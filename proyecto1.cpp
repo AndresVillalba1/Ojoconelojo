@@ -29,23 +29,20 @@ using namespace mfem;
 
 // Definición de funciones y procesos para el desarrollo
 
-// En la definición de funciones modificar la variable y tipo de entrada
-double funCoef(); //kappa coefficient.
-
-double corn_nbc(); //Function E/kappa_1 inhomogeneous Neumann BC.
-
-double escl_nbc(); //Function 0 inhomogeneous Neumann BC.
-
-double f_analytic(); //-Div(kappa Delta T) = f = 0. ----> = 0
-
-double Tsol(); //Solution function.
-
-void T_grad_exact(const Vector &x, Vector &Tsol);//Solution function gradient.
 
 
+// Declaración de funciones
+double myFun1(); // Declaración de myFun1 con un parámetro para el volumen
+
+double funCoef();        // kappa coefficient.
+
+double corn_nbc(double E, double kappa_l); // Declaración de corn_nbc con dos parámetros: E y kappa_l
+
+double escl_nbc();       //Function 0 inhomogeneous Neumann BC.
+
+double f_analytic();     //-Div(kappa Delta T) = f = 0. ----> = 0
 
 
-//
 Mesh * GenerateSerialMesh(int ref);
 
 int main(int argc, char *argv[])
@@ -96,18 +93,7 @@ int main(int argc, char *argv[])
       }
    }
 
-   // 5. Define a parallel mesh by a partitioning of the serial mesh. Refine
-   //    this mesh further in parallel to increase the resolution. Once the
-   //    parallel mesh is defined, the serial mesh can be deleted.
-   ParMesh pmesh(MPI_COMM_WORLD, mesh);
-   mesh.Clear();
-   {
-      // int par_ref_levels = 2; ya declarado arriba
-      for (int l = 0; l < par_ref_levels; l++)
-      {
-         pmesh.UniformRefinement();
-      }
-   }
+   
    // 6. Define a parallel mesh by a partitioning of the serial mesh. Refine
    //    this mesh further in parallel to increase the resolution. Once the
    //    parallel mesh is defined, the serial mesh can be deleted.
@@ -164,15 +150,7 @@ int main(int argc, char *argv[])
    ParGridFunction T(&fespace);
    T = 0.0;
 
-   // 9. To study the solution we convert usol to grid function and the 
-   //solution gradien function, the idea is to calculate the 
-   //error between the MFEM solution and the solution.
-   FunctionCoefficient T1(Tsol);
-   ParGridFunction TSol(&fespace);
-   TSol.ProjectCoefficient(T1);
-   VectorFunctionCoefficient T_grad(dim, T_grad_exact);
-
-   // 10. Set up the parallel bilinear form a(.,.) on the finite element space
+   // 9. Set up the parallel bilinear form a(.,.) on the finite element space
    //    corresponding to the Laplacian operator -Delta, by adding the Diffusion
    //    domain integrator.
    ParBilinearForm a(&fespace);
@@ -180,7 +158,7 @@ int main(int argc, char *argv[])
    a.AddDomainIntegrator(integ);
    a.Assemble();
 
-   // 11. Assemble the parallel linear form for the right hand side vector.
+   // 10. Assemble the parallel linear form for the right hand side vector.
 
    // Set the Dirichlet values in the solution vector |
    //ParLinearForm b(&fespace);                       |--> Necesario?   
@@ -196,12 +174,12 @@ int main(int argc, char *argv[])
    b.Assemble();
 
 
-    // 12. Construct the linear system.
+    // 11. Construct the linear system.
     OperatorPtr A;
     Vector B, X;
     a.FormLinearSystem(T, b, A, X, B);  
 
-    // 13. Solver the linear system AX=B.
+    // 12. Solver the linear system AX=B.
     HypreSolver *amg = new HypreBoomerAMG;
     HyprePCG pcg(MPI_COMM_WORLD);
     pcg.SetTol(1e-12);
@@ -212,16 +190,16 @@ int main(int argc, char *argv[])
     pcg.Mult(B, X);
     delete amg;
 
-    // 14. Recover the parallel grid function corresponding to T. This is the
+    // 13. Recover the parallel grid function corresponding to T. This is the
     //     local finite element solution on each processor.
     a.RecoverFEMSolution(X, b, T);
     // 14.1 Compute the H^1 norms of the error.
-    double h1_err_prev = 0.0;
-    double h_prev = 0.0;
-    double h1_err = u.ComputeH1Error(&T1,&T_grad,&p,1.0,1.0);
-    mfem::out <<"Calculate of the error: "  << h1_err << endl;
+    //double h1_err_prev = 0.0;
+    //double h_prev = 0.0;
+    //double h1_err = T.ComputeH1Error(&T1,&T_grad,&p,1.0,1.0);
+    //mfem::out <<"Calculate of the error: "  << h1_err << endl;
 
-    // 16. Save the refined mesh and the solution in parallel. This output can be
+    // 15. Save the refined mesh and the solution in parallel. This output can be
     //     viewed later using GLVis: "glvis -np <np> -m mesh -g sol".
     {
       ostringstream mesh_name, sol_name;
@@ -236,7 +214,7 @@ int main(int argc, char *argv[])
       sol_ofs.precision(8);
       T.Save(sol_ofs);
    }
-   // 17. Send the solution by socket to a GLVis server.
+   // 16. Send the solution by socket to a GLVis server.
    if (visualization)
    {
       string title_str = "H1";
@@ -246,111 +224,51 @@ int main(int argc, char *argv[])
       sol_sock << "parallel " << Mpi::WorldSize()
                << " " << Mpi::WorldRank() << "\n";
       sol_sock.precision(8);
-      sol_sock << "solution\n" << pmesh << u
+      sol_sock << "solution\n" << pmesh << T
                << "window_title '" << title_str << " Solution'"
                << " keys 'mmc'" << flush;
       socketstream exact_sol(vishost, visport);
-      exact_sol<< "parallel " << Mpi::WorldSize()
-               << " " << Mpi::WorldRank() << "\n";
-      exact_sol.precision(8);
-      //uSol = uSol.Add(-1.0,u);
-      exact_sol << "solution \n" << pmesh << uSol
-                << "window_title 'Exact Solution'\n"
-                << "keys 'mmc'"<< flush;
+ 
       
    }
-   // 18. Free the used memory.
+   // 17. Free the used memory.
    delete fec;
 
    return 0; 
 }
 
-double myFun1( ) 
-{                               
-  return ; //  ---> Definición de Kappa? Como definirla de acuerdo al volumen
-}                              
+double myFun1()
+{
+    return 1.0; // Esta función devuelve 1.0, puedes cambiarla para que dependa del volumen si es necesario
+}                  
+
+
 double funCoef()
 {
-   return (myFun1());
+    return myFun1(1.0); 
 }
 
 //We are going to define the functions in order to get the boundary condition
 // Definir constantes
+const double &E = 40.0; 
+const double &kappa_l = 1.0;
 
-double corn_nbc(const double &E,const double &kappa_l )
+double corn_nbc(double E, double kappa_l)
 {
-    return(E/kappa_l);
+    return E / kappa_l; // Retorna el resultado de E dividido por kappa_l
 }
+
 double escl_nbc( )
 {
     return(0.0);
 }
 
-double f_analytic();
+double f_analytic()
 {
-   return(0.0)       
-}
-double Tsol():
-{
-
-}
-void T_grad_exact()
-{
-
+   return(0.0);       
 }
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-   
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-}
 
 
