@@ -1,0 +1,356 @@
+//Dudas
+//1. Hay 2 formas de definir ser_ref_levels, cual escoger?
+//2. Para definir los elementos del espacio finito se pues hacer 
+// como lo puse aca o como esta entre las lineal 160-189 del ex1p 
+//3. Definición de Kappa? Como definirla de acuerdo al volumen
+
+
+//  Anotaciones
+// Paso 7.b importante para cuando definamos la matriz. Lo dejamos?
+
+
+
+
+
+
+
+
+
+
+
+
+#include "mfem.hpp"
+#include <fstream>
+#include <iostream>
+
+using namespace std;
+using namespace mfem;
+
+
+// Definición de funciones y procesos para el desarrollo
+
+// En la definición de funciones modificar la variable y tipo de entrada
+double funCoef(); //kappa coefficient.
+
+double corn_nbc(); //Function E/kappa_1 inhomogeneous Neumann BC.
+
+double escl_nbc(); //Function 0 inhomogeneous Neumann BC.
+
+double f_analytic(); //-Div(kappa Delta T) = f = 0. ----> = 0
+
+double Tsol(); //Solution function.
+
+void T_grad_exact(const Vector &x, Vector &Tsol);//Solution function gradient.
+
+
+
+
+//
+Mesh * GenerateSerialMesh(int ref);
+
+int main(int argc, char *argv[])
+{
+    //1. Initialize MPI and HYPRE.
+    Mpi::Init();
+    if (!Mpi::Root()){mfem::out.Disable(); mfem::err.Disable();}
+    Hypre::Init();
+
+    //2. Parse command-line options.
+    const char *mesh_file = "../data/ojo5.msh";
+    int ser_ref_levels = 2;
+    int par_ref_levels = 4;
+    int order = 1;
+    bool visualization = true;
+
+    OptionsParser args(argc, argv);
+    args.AddOption(&order, "-o", "--order",
+                  "Finite element order (polynomial degree) or -1 for"
+                  " isoparametric space.");
+    args.AddOption(&ser_ref_levels, "-rs", "--refine-serial",
+                  "Number of times to refine the mesh uniformly in serial.");
+    args.AddOption(&par_ref_levels, "-rp", "--refine-parallel",
+                  "Number of times to refine the mesh uniformly in parallel.");
+    args.AddOption(&visualization, "-vis", "--visualization", "-no-vis",
+                  "--no-visualization",
+                  "Enable or disable GLVis visualization.");
+    args.Parse();
+    if (!args.Good())
+    {
+        args.PrintUsage(mfem::out);
+        return 1;
+    }
+   // 3. Read the (serial) mesh from the given mesh file on all processors.  We
+   //    can handle triangular, quadrilateral, tetrahedral, hexahedral, surface
+   //    and volume meshes with the same code.
+   Mesh mesh(mesh_file, 1, 1);
+   int dim = mesh.Dimension();
+   // 4. Refine the serial mesh on all processors to increase the resolution. In
+   //    this example we do 'ref_levels' of uniform refinement. We choose
+   //    'ref_levels' to be the largest number that gives a final mesh with no
+   //    more than 10,000 elements.
+   {
+      int ser_ref_levels =  (int)floor(log(10000./mesh.GetNE())/log(2.)/dim);  // ya declarado arriba pero asi ?
+      for (int l = 0; l < ser_ref_levels; l++)
+      {
+         mesh.UniformRefinement();
+      }
+   }
+
+   // 5. Define a parallel mesh by a partitioning of the serial mesh. Refine
+   //    this mesh further in parallel to increase the resolution. Once the
+   //    parallel mesh is defined, the serial mesh can be deleted.
+   ParMesh pmesh(MPI_COMM_WORLD, mesh);
+   mesh.Clear();
+   {
+      // int par_ref_levels = 2; ya declarado arriba
+      for (int l = 0; l < par_ref_levels; l++)
+      {
+         pmesh.UniformRefinement();
+      }
+   }
+   // 6. Define a parallel mesh by a partitioning of the serial mesh. Refine
+   //    this mesh further in parallel to increase the resolution. Once the
+   //    parallel mesh is defined, the serial mesh can be deleted.
+   ParMesh pmesh(MPI_COMM_WORLD, mesh);
+   mesh.Clear();
+   {
+      int par_ref_levels = 2;
+      for (int l = 0; l < par_ref_levels; l++)
+      {
+         pmesh.UniformRefinement();
+      }
+   }
+   // 5. Define a parallel finite element space on the parallel mesh. 
+   //    Here we use continuous Lagrange finite elements of the
+   //    specified order.
+   FiniteElementCollection *fec = new H1_FECollection(order, dim);
+   ParFiniteElementSpace fespace(&pmesh, fec);
+   HYPRE_BigInt size = fespace.GlobalTrueVSize();
+   mfem::out << "Number of finite element unknowns" << size << endl;
+
+   // 6. Create "marker arrays" to define the portions of boundary associated
+   //    with each type of boundary condition. These arrays have an entry
+   //    corresponding to each boundary attribute. Placing a '1' in entry i
+   //    marks attribute i+1 as being active, '0' is inactive.
+
+   Array<int> nbc_corn(pmesh.bdr_attributes.Max());
+   Array<int> nbc_scle(pmesh.bdr_attributes.Max());
+   
+   nbc_corn = 0; nbc_corn[0] = 1;
+   nbc_scle = 0; nbc_scle[1] = 1;
+
+
+   //7. Setup the various coefficients needed for the Laplace operator and the
+   //    various boundary conditions.
+   FunctionCoefficient p(funCoef);
+   ParGridFunction kappa1(&fespace); //Let's add the coefficient kappa
+   kappa1.ProjectCoefficient(p);
+   GridFunctionCoefficient kappa(&kappa1);
+   //7.a Now we convert the boundary conditions and the f in the Laplace's
+   // equation in to a FunctionCoeffcient. 
+   FunctionCoefficient g1(corn_nbc);
+   FunctionCoefficient g2(escl_nbc);
+   FunctionCoefficient f_an(f_analytic);
+
+   // 7.b Since the n.Grad(u) terms arise by integrating -Div(rho Grad(u)) by parts we
+   // must introduce the coefficient 'rho' (rho) into the boundary conditions.
+   // Therefore, in the case of the Neumann BC, we actually enforce rho n.Grad(u)
+   // = rho g rather than simply n.Grad(u) = g.
+   ProductCoefficient m_nbc1Coef(g1, kappa);
+   ProductCoefficient m_nbc2Coef(g2, kappa);
+
+   // 8. Define the solution vector u as a parallel finite element grid function
+   //    corresponding to fespace. Initialize u with initial guess of zero.
+   ParGridFunction T(&fespace);
+   T = 0.0;
+
+   // 9. To study the solution we convert usol to grid function and the 
+   //solution gradien function, the idea is to calculate the 
+   //error between the MFEM solution and the solution.
+   FunctionCoefficient T1(Tsol);
+   ParGridFunction TSol(&fespace);
+   TSol.ProjectCoefficient(T1);
+   VectorFunctionCoefficient T_grad(dim, T_grad_exact);
+
+   // 10. Set up the parallel bilinear form a(.,.) on the finite element space
+   //    corresponding to the Laplacian operator -Delta, by adding the Diffusion
+   //    domain integrator.
+   ParBilinearForm a(&fespace);
+   BilinearFormIntegrator *integ = new MixedGradGradIntegrator(kappa);
+   a.AddDomainIntegrator(integ);
+   a.Assemble();
+
+   // 11. Assemble the parallel linear form for the right hand side vector.
+
+   // Set the Dirichlet values in the solution vector |
+   //ParLinearForm b(&fespace);                       |--> Necesario?   
+   //T.ProjectBdrCoefficient(g3,dbc_bdr3);            |  
+
+   //Add the f parameter to the vector b
+   b.AddDomainIntegrator(new DomainLFIntegrator(f_an));
+   //Add the desired value for n.Grad(T) on the Neumann Boundary 1
+   b.AddBoundaryIntegrator(new BoundaryLFIntegrator(m_nbc1Coef),nbc_corn);
+   //Add the desired value for n.Grad(T) on the Neumann Boundary 2
+   b.AddBoundaryIntegrator(new BoundaryLFIntegrator(m_nbc2Coef),nbc_scle);
+   // Assemble
+   b.Assemble();
+
+
+    // 12. Construct the linear system.
+    OperatorPtr A;
+    Vector B, X;
+    a.FormLinearSystem(T, b, A, X, B);  
+
+    // 13. Solver the linear system AX=B.
+    HypreSolver *amg = new HypreBoomerAMG;
+    HyprePCG pcg(MPI_COMM_WORLD);
+    pcg.SetTol(1e-12);
+    pcg.SetMaxIter(200);
+    pcg.SetPrintLevel(2);
+    pcg.SetPreconditioner(*amg);
+    pcg.SetOperator(*A);
+    pcg.Mult(B, X);
+    delete amg;
+
+    // 14. Recover the parallel grid function corresponding to T. This is the
+    //     local finite element solution on each processor.
+    a.RecoverFEMSolution(X, b, T);
+    // 14.1 Compute the H^1 norms of the error.
+    double h1_err_prev = 0.0;
+    double h_prev = 0.0;
+    double h1_err = u.ComputeH1Error(&T1,&T_grad,&p,1.0,1.0);
+    mfem::out <<"Calculate of the error: "  << h1_err << endl;
+
+    // 16. Save the refined mesh and the solution in parallel. This output can be
+    //     viewed later using GLVis: "glvis -np <np> -m mesh -g sol".
+    {
+      ostringstream mesh_name, sol_name;
+      mesh_name << "mesh." << setfill('0') << setw(6) << Mpi::WorldRank();
+      sol_name << "sol." << setfill('0') << setw(6) << Mpi::WorldRank();
+
+      ofstream mesh_ofs(mesh_name.str().c_str());
+      mesh_ofs.precision(8);
+      pmesh.Print(mesh_ofs);
+
+      ofstream sol_ofs(sol_name.str().c_str());
+      sol_ofs.precision(8);
+      T.Save(sol_ofs);
+   }
+   // 17. Send the solution by socket to a GLVis server.
+   if (visualization)
+   {
+      string title_str = "H1";
+      char vishost[] = "localhost";
+      int  visport   = 19916;
+      socketstream sol_sock(vishost, visport);
+      sol_sock << "parallel " << Mpi::WorldSize()
+               << " " << Mpi::WorldRank() << "\n";
+      sol_sock.precision(8);
+      sol_sock << "solution\n" << pmesh << u
+               << "window_title '" << title_str << " Solution'"
+               << " keys 'mmc'" << flush;
+      socketstream exact_sol(vishost, visport);
+      exact_sol<< "parallel " << Mpi::WorldSize()
+               << " " << Mpi::WorldRank() << "\n";
+      exact_sol.precision(8);
+      //uSol = uSol.Add(-1.0,u);
+      exact_sol << "solution \n" << pmesh << uSol
+                << "window_title 'Exact Solution'\n"
+                << "keys 'mmc'"<< flush;
+      
+   }
+   // 18. Free the used memory.
+   delete fec;
+
+   return 0; 
+}
+
+double myFun1( ) 
+{                               
+  return ; //  ---> Definición de Kappa? Como definirla de acuerdo al volumen
+}                              
+double funCoef()
+{
+   return (myFun1());
+}
+
+//We are going to define the functions in order to get the boundary condition
+// Definir constantes
+
+double corn_nbc(const double &E,const double &kappa_l )
+{
+    return(E/kappa_l);
+}
+double escl_nbc( )
+{
+    return(0.0);
+}
+
+double f_analytic();
+{
+   return(0.0)       
+}
+double Tsol():
+{
+
+}
+void T_grad_exact()
+{
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   
+
+
+
+    
+
+
+
+
+
+
+
+
+
+
+
+
+}
+
+
